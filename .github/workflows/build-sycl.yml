@@ -1,7 +1,7 @@
 name: CI (sycl)
 
 on:
-  workflow_dispatch: # allows manual triggering
+  workflow_dispatch:
   push:
     branches:
       - master
@@ -26,6 +26,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+
 jobs:
 
   ubuntu-24-sycl:
@@ -37,6 +40,9 @@ jobs:
             fp16: OFF
 
     runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
 
     env:
       ONEAPI_ROOT: /opt/intel/oneapi/
@@ -71,6 +77,8 @@ jobs:
       - name: Clone
         id: checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: ccache
         uses: ggml-org/ccache-action@v1.2.21
@@ -93,3 +101,33 @@ jobs:
             -DGGML_NATIVE=OFF \
             -DGGML_SYCL_F16=${{ matrix.fp16 }}
           time cmake --build build --config Release -j $(nproc)
+
+      - name: Determine tag name
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        id: tag
+        uses: ./.github/actions/get-tag-name
+
+      - name: Pack artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        id: pack
+        run: |
+          cp LICENSE ./build/bin/
+          ARCHIVE="llama-${{ steps.tag.outputs.name }}-bin-ubuntu-sycl-${{ matrix.build }}-x64.tar.gz"
+          tar -czvf "$ARCHIVE" --transform "s,^\.,llama-${{ steps.tag.outputs.name }}," -C ./build/bin .
+          echo "archive=$ARCHIVE" >> $GITHUB_OUTPUT
+
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          ARCHIVE="${{ steps.pack.outputs.archive }}"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$ARCHIVE" --clobber
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "${{ github.event.head_commit.message }}" \
+              "$ARCHIVE"
+          fi
